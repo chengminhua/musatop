@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musatop"
+version = "0.1.0"
+description = "An interactive terminal monitor for Moore Threads GPUs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = ["psutil>=5.9,<8"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console :: Curses",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/chengminhua/musatop"
+Issues = "https://github.com/chengminhua/musatop/issues"
+
+[project.scripts]
+musatop = "musatop.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["musatop*"]

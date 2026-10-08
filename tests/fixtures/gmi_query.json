@@ -1,0 +1,30 @@
+{
+  "Timestamp": "Thu Oct 8 17:13:01 2026",
+  "Driver Version": "3.3.8-server",
+  "Attached GPUs": "2",
+  "GPU": [
+    {
+      "Index": "0",
+      "Product Name": "X10000",
+      "Product Brand": "MTT",
+      "GPU UUID": "fixture-gpu-0",
+      "PCI": {"Bus ID": "00000000:03:00.0"},
+      "FB Memory Usage": {"Total": "81920MiB", "Used": "1024MiB", "Free": "80896MiB"},
+      "Utilization": {"Gpu": "42%", "Memory": "19%", "Encoder": "0%", "Decoder": "0%"},
+      "Temperature": {"GPU Current Temp": "34C"},
+      "Power Readings": {"Power Draw ": "367.49W", "Current Power Limit": "950.00W", "Requested Power Limit": "N/A"},
+      "Clocks": {"Graphics": "1750MHz", "Memory": "2500MHz", "Video": "0MHz"}
+    },
+    {
+      "Index": "3",
+      "Product Name": "X10000",
+      "GPU UUID": "fixture-gpu-3",
+      "PCI": {"Bus ID": "00000000:07:00.0"},
+      "FB Memory Usage": {"Total": "81920MiB", "Used": "N/A", "Free": "N/A"},
+      "Utilization": {"Gpu": "0%", "Memory": "N/A"},
+      "Temperature": {"GPU Current Temp": "N/A"},
+      "Power Readings": {"Power Draw ": "N/A", "Current Power Limit": "N/A"},
+      "Clocks": {"Graphics": "N/A", "Memory": "N/A"}
+    }
+  ]
+}
