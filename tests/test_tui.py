@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from musatop.models import Device, Host, Process, Snapshot
+from musatop.history import HistoryPoint, device_key
 from musatop.tui import TerminalUI, run_tui
 from musatop.view import Options
 
@@ -24,7 +25,7 @@ def sample(device_count=8, process_count=12):
         musa_version="test-musa",
         host=Host(hostname="test-host", cpu_percent=30, memory_used_bytes=1024**3, memory_total_bytes=8 * 1024**3),
         devices=[
-            Device(index=i, name=f"MTT-S5000-{i}", gpu_utilization_percent=25,
+            Device(index=i, uuid=f"test-gpu-{i}", name=f"MTT-S5000-{i}", gpu_utilization_percent=25,
                    memory_used_bytes=2 * 1024**3, memory_total_bytes=80 * 1024**3,
                    temperature_c=40, power_draw_w=120, power_limit_w=300)
             for i in range(device_count)
@@ -45,9 +46,13 @@ class FakeMonitor:
         self.snapshot = snapshot
         self.refreshes = 0
         self.started = self.stopped = False
+        self.history = {}
 
     def latest(self):
         return self.snapshot
+
+    def latest_with_history(self):
+        return self.snapshot, self.history
 
     def start(self):
         self.started = True
@@ -63,15 +68,21 @@ class FakeScreen:
     def __init__(self, height=24, width=80):
         self.height, self.width = height, width
         self.lines = {}
+        self.attributes = {}
 
     def getmaxyx(self):
         return self.height, self.width
 
     def addnstr(self, row, col, text, limit, attr=0):
-        self.lines[row] = text[:limit]
+        previous = self.lines.get(row, "").ljust(col)
+        value = text[:limit]
+        self.lines[row] = previous[:col] + value + previous[col + len(value):]
+        for index in range(col, col + len(value)):
+            self.attributes[(row, index)] = attr
 
     def erase(self):
         self.lines.clear()
+        self.attributes.clear()
 
     def refresh(self):
         pass
@@ -94,6 +105,14 @@ class TerminalUITests(unittest.TestCase):
         for i in range(8):
             self.assertIn(f"MTT-S5000-{i}", output)
         self.assertIn("1000", output)
+        self.assertEqual(self.ui.process_page_size, 5)
+        for pid in range(1000, 1005):
+            self.assertIn(str(pid), output)
+        self.assertNotIn("1005", output)
+        self.assertIn("Trend GPU 0", self.screen.lines[19])
+        self.assertIn("5 min", output)
+        self.assertIn("UTIL |", self.screen.lines[20])
+        self.assertIn("VRAM |", self.screen.lines[21])
         self.ui.handle_key(curses.KEY_END)
         self.ui.render()
         self.assertIn("1011", self.screen.content())
@@ -105,7 +124,7 @@ class TerminalUITests(unittest.TestCase):
         self.ui.render()
         self.ui.handle_key(curses.KEY_NPAGE)
         self.ui.render()
-        self.assertIn("MTT-S5000-12", self.screen.content())
+        self.assertIn("MTT-S5000-9", self.screen.content())
         self.assertNotIn("MTT-S5000-0 ", self.screen.content())
         self.screen.height, self.screen.width = 10, 40
         self.ui.handle_key(curses.KEY_RESIZE)
@@ -136,6 +155,171 @@ class TerminalUITests(unittest.TestCase):
         self.assertTrue(self.options.current_user)
         self.assertTrue(self.options.compact)
         self.assertEqual(self.monitor.refreshes, 1)
+
+    def test_trend_gpu_selection_is_independent_and_survives_device_reordering(self):
+        self.ui.handle_key(curses.KEY_DOWN)
+        self.ui.handle_key("g")
+        self.assertEqual(self.ui.selected, 1)
+        self.assertEqual(self.ui.current_trend_device().index, 1)
+        self.monitor.snapshot.devices.reverse()
+        self.ui.update()
+        self.assertEqual(self.ui.current_trend_device().index, 1)
+        self.ui.handle_key("G")
+        self.assertEqual(self.ui.current_trend_device().index, 2)
+        self.options.gpu = {5, 6}
+        self.ui.update()
+        self.assertEqual(self.ui.current_trend_device().index, 6)
+        self.options.gpu = {999}
+        self.ui.update()
+        self.ui.render()
+        self.assertIsNone(self.ui.current_trend_device())
+        self.assertIn("Trend no visible GPU", self.screen.content())
+
+    def test_trend_switch_wraps_and_process_filter_does_not_change_gpu(self):
+        self.ui.handle_key("G")
+        self.assertEqual(self.ui.current_trend_device().index, 7)
+        self.ui.handle_key("g")
+        self.assertEqual(self.ui.current_trend_device().index, 0)
+        self.options.search = "workload_9.py"
+        self.ui.update()
+        self.assertEqual(self.ui.current_trend_device().index, 0)
+        self.assertEqual(self.ui.current_process().pid, 1009)
+
+    def test_trend_toggle_reclaims_rows_and_resize_preserves_preference(self):
+        self.ui.render()
+        self.ui.handle_key("h")
+        self.ui.render()
+        self.assertNotIn("Trend GPU", self.screen.content())
+        self.assertEqual(self.ui.process_page_size, 8)
+        self.screen.height = 15
+        self.ui.render()
+        self.screen.height = 24
+        self.ui.render()
+        self.assertFalse(self.ui.show_trend)
+        self.assertNotIn("Trend GPU", self.screen.content())
+        self.ui.handle_key("h")
+        self.screen.height = 15
+        self.ui.render()
+        self.assertTrue(self.ui.show_trend)
+        self.assertNotIn("Trend GPU", self.screen.content())
+        self.screen.height = 24
+        self.ui.render()
+        self.assertIn("Trend GPU", self.screen.content())
+
+    def test_narrow_layout_keeps_both_metrics_temperature_power_and_details(self):
+        for width in (60, 79):
+            with self.subTest(width=width):
+                self.screen.width = width
+                self.ui.render()
+                output = self.screen.content()
+                self.assertNotIn("MTT-S5000", output)
+                self.assertIn("25%", self.screen.lines[4])
+                self.assertIn("2.0/80.0GiB", self.screen.lines[4])
+                self.assertIn("40C", self.screen.lines[4])
+                self.assertIn("120/300", self.screen.lines[4])
+                self.assertIn("workload_0", self.screen.lines[14])
+                self.assertIn("k term Enter info", self.screen.lines[23])
+                self.assertEqual(self.ui.process_page_size, 5)
+        self.assertFalse(self.options.compact)
+
+    def test_unknown_values_differ_from_zero_and_stale_rows_are_dim(self):
+        self.monitor.snapshot.devices[0].gpu_utilization_percent = None
+        self.monitor.snapshot.devices[1].gpu_utilization_percent = 0
+        self.monitor.snapshot.devices[0].memory_total_bytes = 0
+        self.ui.ascii = False
+        self.ui.update()
+        self.ui.render()
+        self.assertIn("░", self.screen.lines[4])
+        self.assertIn("N/A", self.screen.lines[4])
+        self.assertIn("  0%", self.screen.lines[5])
+        self.assertNotIn("░", self.screen.lines[5])
+        self.monitor.snapshot.devices_stale = True
+        self.ui.update()
+        self.ui.render()
+        self.assertIn("STALE", self.screen.lines[2])
+        self.assertIn("STALE", self.screen.lines[19])
+        for (row, _), attr in self.screen.attributes.items():
+            if 4 <= row <= 11 or row in (20, 21):
+                self.assertTrue(attr & curses.A_DIM)
+
+    def test_mixed_memory_units_never_truncate_temperature_or_power_limit(self):
+        for width in (60, 79, 80, 140):
+            percent_columns = None
+            for mib in (0, 1, 900, 1023, 1024, 81920):
+                with self.subTest(width=width, used_mib=mib):
+                    self.screen.width = width
+                    device = self.monitor.snapshot.devices[0]
+                    device.memory_used_bytes = mib * 1024**2
+                    device.power_draw_w = device.power_limit_w = 950
+                    self.ui.update()
+                    self.ui.render()
+                    line = self.screen.lines[4]
+                    self.assertIn(self.ui.device_memory(device), line)
+                    self.assertIn("40C", line)
+                    self.assertTrue(line.endswith("950/950"), line)
+                    self.assertLessEqual(len(line), width - 1)
+                    columns = [i for i, value in enumerate(line) if value == "%"]
+                    if percent_columns is None:
+                        percent_columns = columns
+                    self.assertEqual(columns, percent_columns)
+
+    def test_history_uses_uuid_and_retains_gaps_on_fixed_five_minute_scale(self):
+        key = device_key(self.monitor.snapshot.devices[0])
+        self.monitor.history[key] = [HistoryPoint(701, 0, 10), HistoryPoint(1000, 100, 50)]
+        self.ui.ascii = False
+        with patch("musatop.tui.time.monotonic", return_value=1000):
+            self.ui.update()
+            self.ui.render()
+        self.assertTrue(self.screen.lines[20].startswith("UTIL |▁"))
+        self.assertIn(" " * 64 + "█|", self.screen.lines[20])
+        self.assertIn(" 25%", self.screen.lines[20])  # current reading, not the bucket peak
+        self.assertIn("fixed 0-100%", self.screen.lines[19])
+        self.ui.handle_key("g")
+        self.ui.render()
+        self.assertIn("UTIL |" + " " * 66 + "|", self.screen.lines[20])
+
+    def test_ascii_can_be_forced_and_non_utf8_terminal_falls_back(self):
+        with patch("musatop.tui.locale.getpreferredencoding", return_value="ASCII"):
+            ui = TerminalUI(self.screen, self.monitor, Options())
+            self.assertTrue(ui.ascii)
+        with patch("musatop.tui.locale.getpreferredencoding", return_value="UTF-8"):
+            ui = TerminalUI(self.screen, self.monitor, Options(ascii=True))
+            self.assertTrue(ui.ascii)
+            ui.update()
+            ui.render()
+            self.assertIn("#", self.screen.lines[4])
+            self.assertTrue(self.screen.content().isascii())
+            ui = TerminalUI(self.screen, self.monitor, Options())
+            self.assertFalse(ui.ascii)
+
+    def test_color_disabled_and_terminal_palette_fallback(self):
+        ui = TerminalUI(self.screen, self.monitor, Options(no_color=True))
+        with patch("musatop.tui.curses.has_colors") as has_colors:
+            ui.init_colors()
+        has_colors.assert_not_called()
+        self.assertEqual(ui.load_color(100), 0)
+        for colors, pairs, expected in ((256, 256, 10), (8, 64, 3), (0, 0, 0)):
+            with self.subTest(colors=colors), patch("musatop.tui.curses.has_colors", return_value=True), \
+                patch("musatop.tui.curses.start_color"), patch("musatop.tui.curses.use_default_colors"), \
+                patch("musatop.tui.curses.init_pair") as init_pair, \
+                patch("musatop.tui.curses.color_pair", side_effect=lambda i: i << 8), \
+                patch("musatop.tui.curses.COLORS", colors, create=True), \
+                patch("musatop.tui.curses.COLOR_PAIRS", pairs, create=True):
+                self.ui.init_colors()
+                self.assertEqual(len(self.ui.colors), expected)
+                self.assertEqual(init_pair.call_count, expected + 1 if expected else 0)
+                if expected:
+                    self.assertNotEqual(self.ui.load_color(0), self.ui.load_color(100))
+
+    def test_gradient_bar_and_fixed_percent_column(self):
+        self.ui.colors = [256, 512, 768]
+        self.ui.ascii = False
+        self.ui.render_bar(4, 0, 100, 9, False)
+        self.assertEqual(self.screen.lines[4], "█████████ 100%")
+        self.assertNotEqual(self.screen.attributes[(4, 0)], self.screen.attributes[(4, 8)])
+        self.screen.erase()
+        self.ui.render_bar(4, 0, 0, 9, False)
+        self.assertEqual(self.screen.lines[4], "            0%")
 
     def test_details_preserve_full_command_and_scroll(self):
         self.ui.handle_key("\n")
@@ -284,7 +468,7 @@ class Monitor:
     def start(self): pass
     def stop(self): self.stopped = True
     def refresh(self): pass
-    def latest(self): raise RuntimeError('injected render-side failure')
+    def latest_with_history(self): raise RuntimeError('injected render-side failure')
 monitor = Monitor()
 try:
     run_tui(monitor, Options())
@@ -325,18 +509,27 @@ else:
             initial = termios.tcgetattr(slave)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
             code = """
-from musatop.tui import run_tui
+import musatop.tui as tui
 from musatop.view import Options
 from musatop.models import Snapshot, Device, Process
+controls = []
+class RecordingUI(tui.TerminalUI):
+    def handle_key(self, key):
+        super().handle_key(key)
+        if key in ('g', 'G', 'h'):
+            controls.append((key, self.current_trend_device().index, self.show_trend))
+tui.TerminalUI = RecordingUI
 class Monitor:
     def start(self): pass
     def stop(self): pass
     def refresh(self): pass
-    def latest(self):
-        return Snapshot(devices=[Device(index=i, name='MTT-PTY-'+str(i)) for i in range(8)],
+    def latest_with_history(self):
+        return Snapshot(devices=[Device(index=i, uuid='pty-'+str(i), name='MTT-PTY-'+str(i)) for i in range(8)],
             processes=[Process(device_index=0,pid=876543,username='pty-user',
-                command='python pty-smoke.py',create_time=123,status='ok')])
-run_tui(Monitor(), Options())
+                command='python pty-smoke.py',create_time=123,status='ok')]), {}
+tui.run_tui(Monitor(), Options())
+assert controls == [('g', 1, True), ('G', 0, True), ('h', 0, False), ('h', 0, True)], controls
+print('CONTROLS_OK')
 print('UI_DONE')
 """
             child = subprocess.Popen(
@@ -355,6 +548,8 @@ print('UI_DONE')
                 self.assertIn(marker, output, output[-2000:].decode(errors="replace"))
 
             read_until(b"MTT-PTY-7")
+            read_until(b"5 min")
+            os.write(master, b"gGhh")
             os.write(master, b"?")
             read_until(b"next process sort field")
             os.write(master, b"\nsc/pty-smoke\n\n")
@@ -371,6 +566,7 @@ print('UI_DONE')
             child.send_signal(signal.SIGWINCH)
             os.write(master, b"q")
             read_until(b"UI_DONE")
+            self.assertIn(b"CONTROLS_OK", output)
             self.assertEqual(child.wait(timeout=5), 0)
             self.assertEqual(termios.tcgetattr(slave), initial)
         finally:

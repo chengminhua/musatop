@@ -19,6 +19,8 @@ class Options:
     search: str = ""
     current_user: bool = False
     compact: bool = False
+    ascii: bool = False
+    no_color: bool = False
 
 
 def safe_text(value: str | None) -> str:

@@ -1,8 +1,9 @@
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from musatop.history import HistoryPoint, device_key
 from musatop.models import Device, Host, Process, Snapshot
 from musatop.monitor import Monitor
 
@@ -43,6 +44,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.host.hostname, "fixture-host")
         monitor.enricher.enrich.assert_called_once_with(raw)
         backend.sample.assert_called_once_with()
+        self.assertEqual(monitor.latest_with_history(), (None, {}))
 
     def test_host_failure_retains_device_data_and_reports_error(self):
         backend = MagicMock()
@@ -153,6 +155,59 @@ class MonitorTests(unittest.TestCase):
         monitor.stop()
         self.assertEqual(maximum, 1)
         self.assertEqual(backend.sample.call_count, 2)
+
+    def test_background_history_uses_completion_time_and_skips_failed_samples(self):
+        backend = MagicMock()
+        first = Device(0, uuid="fixture-gpu", gpu_utilization_percent=10,
+                       memory_used_bytes=25, memory_total_bytes=100)
+        last = Device(0, uuid="fixture-gpu", gpu_utilization_percent=80,
+                      memory_used_bytes=60, memory_total_bytes=100)
+        events = iter([(11.5, Snapshot(devices=[first])),
+                       (20.1, RuntimeError("driver unavailable")),
+                       (33.8, Snapshot(devices=[last]))])
+        now = 10.0
+
+        def sample():
+            nonlocal now
+            now, result = next(events)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        backend.sample.side_effect = sample
+        monitor = self.make_monitor(backend)
+        monitor._stop = MagicMock()
+        monitor._stop.is_set.side_effect = [False, False, False, True]
+        monitor._wake = MagicMock()
+        observations = []
+        monitor._wake.wait.side_effect = lambda timeout: observations.append(monitor.latest_with_history())
+        with patch("musatop.monitor.time.monotonic", side_effect=lambda: now):
+            monitor._run()
+            result, history = monitor.latest_with_history()
+        key = device_key(first)
+        self.assertEqual(history[key], [HistoryPoint(11, 10, 25), HistoryPoint(33, 80, 60)])
+        self.assertEqual(observations[0][1][key], [HistoryPoint(11, 10, 25)])
+        self.assertTrue(observations[1][0].devices_stale)
+        self.assertEqual(observations[1][1][key], [HistoryPoint(11, 10, 25)])
+        self.assertFalse(result.devices_stale)
+        self.assertEqual(backend.sample.call_count, 3)
+
+    def test_latest_with_history_is_consistent_and_independent_and_expires_without_sampling(self):
+        monitor = self.make_monitor()
+        device = Device(0, uuid="fixture-gpu", gpu_utilization_percent=10)
+        monitor._snapshot = Snapshot(devices=[device])
+        monitor._history.record(monitor._snapshot, 10)
+        key = device_key(device)
+        with patch("musatop.monitor.time.monotonic", return_value=10):
+            snapshot, history = monitor.latest_with_history()
+            snapshot.devices[0].gpu_utilization_percent = 99
+            history[key].clear()
+            second_snapshot, second_history = monitor.latest_with_history()
+        self.assertEqual(second_snapshot.devices[0].gpu_utilization_percent, 10)
+        self.assertEqual(second_history[key], [HistoryPoint(10, 10, None)])
+        with patch("musatop.monitor.time.monotonic", return_value=310):
+            self.assertEqual(monitor.latest_with_history()[1], {})
+        self.assertNotIn("history", monitor.latest().to_dict())
 
 
 if __name__ == "__main__":

@@ -40,6 +40,8 @@ def parser():
     result.add_argument("--user", help="exact host username")
     result.add_argument("--sort", choices=SORT_KEYS, default="gpu_memory", help="sort processes (default: gpu_memory)")
     result.add_argument("--reverse", action="store_true", help="reverse the default sort direction")
+    result.add_argument("--ascii", action="store_true", help="use ASCII bars and trends (TUI only)")
+    result.add_argument("--no-color", action="store_true", help="disable colors (TUI only)")
     return result
 
 
@@ -48,7 +50,8 @@ def main(argv=None) -> int:
     if not sys.platform.startswith("linux"):
         print("musatop currently supports Linux hosts only.", file=sys.stderr)
         return 1
-    options = Options(gpu=args.gpu, pid=args.pid, user=args.user, sort=args.sort, reverse=args.reverse)
+    options = Options(gpu=args.gpu, pid=args.pid, user=args.user, sort=args.sort, reverse=args.reverse,
+                      ascii=args.ascii, no_color=args.no_color)
     from .monitor import Monitor
     monitor = Monitor(args.interval)
     try:

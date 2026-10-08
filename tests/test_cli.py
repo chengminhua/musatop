@@ -63,5 +63,23 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 main(["--version"])
             self.assertEqual(exc.exception.code, 0)
-            self.assertIn("0.1.1", out.getvalue())
+            self.assertIn("0.2.0", out.getvalue())
             sample.assert_not_called()
+
+    def test_display_flags_do_not_change_one_shot_formats(self):
+        snapshot = Snapshot(devices=[Device(0, gpu_utilization_percent=42)])
+        for mode in ("--json", "--once"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.invoke([mode], snapshot),
+                                 self.invoke([mode, "--ascii", "--no-color"], snapshot))
+
+    def test_display_flags_reach_tui_without_one_shot_sampling(self):
+        with patch("musatop.cli.sys.stdin.isatty", return_value=True), \
+             patch("musatop.cli.sys.stdout.isatty", return_value=True), \
+             patch("musatop.tui.run_tui", return_value=0) as run, \
+             patch("musatop.monitor.Monitor.sample") as sample:
+            self.assertEqual(main(["--ascii", "--no-color"]), 0)
+        options = run.call_args.args[1]
+        self.assertTrue(options.ascii)
+        self.assertTrue(options.no_color)
+        sample.assert_not_called()

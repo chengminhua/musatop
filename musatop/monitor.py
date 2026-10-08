@@ -6,6 +6,7 @@ import threading
 import time
 
 from .backend import GmiBackend
+from .history import HistoryBuffer, HistoryPoint
 from .models import Snapshot, utc_now
 from .processes import ProcessEnricher
 
@@ -18,6 +19,7 @@ class Monitor:
         self.backend = backend if backend is not None else GmiBackend()
         self.enricher = ProcessEnricher()
         self._snapshot: Snapshot | None = None
+        self._history = HistoryBuffer()
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -50,12 +52,18 @@ class Monitor:
                 snapshot.devices_stale = snapshot.processes_stale = True
                 snapshot.errors = [f"Sampling failed: {type(exc).__name__}: {exc}"]
             with self._lock:
+                self._history.record(snapshot, time.monotonic())
                 self._snapshot = snapshot
             self._wake.wait(max(0, self.interval - (time.monotonic() - started)))
 
     def latest(self) -> Snapshot | None:
         with self._lock:
             return copy.deepcopy(self._snapshot)
+
+    def latest_with_history(self) -> tuple[Snapshot | None, dict[str, list[HistoryPoint]]]:
+        """Return consistent, independently owned data for one UI redraw."""
+        with self._lock:
+            return copy.deepcopy(self._snapshot), self._history.snapshot(time.monotonic())
 
     def refresh(self):
         self._wake.set()
