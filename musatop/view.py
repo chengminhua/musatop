@@ -107,5 +107,11 @@ def render_text(snapshot: Snapshot) -> str:
     if snapshot.devices_stale or snapshot.processes_stale:
         lines.append(f"STALE: devices={snapshot.devices_stale}, processes={snapshot.processes_stale}; "
                      f"last successful samples: {snapshot.devices_sampled_at}, {snapshot.processes_sampled_at}")
+    if snapshot.musa_version is None and snapshot.musa_version_reason:
+        lines.append(f"NOTE: MUSA Toolkit: {safe_text(snapshot.musa_version_reason)}")
+    unavailable = [str(d.index) for d in snapshot.devices if d.power_limit_reason]
+    if unavailable:
+        lines.append(f"NOTE: GPU {','.join(unavailable)} power limit unavailable from GMI; "
+                     "power draw is a separate reading. See power_limit_reason in --json.")
     lines.extend(f"ERROR: {safe_text(error)}" for error in snapshot.errors)
     return "\n".join(lines)

@@ -12,10 +12,10 @@ import math
 import os
 import re
 import subprocess
-from pathlib import Path
 from typing import Any
 
 from .models import Device, Process, Snapshot, utc_now
+from .toolkit import detect_toolkit
 
 
 class CollectionError(RuntimeError):
@@ -70,6 +70,20 @@ def _number(value: Any, unit: str, *, negative: bool = False) -> float | None:
 def _percent(value: Any) -> float | None:
     result = _number(value, "%")
     return result if result is None or result <= 100 else None
+
+
+def _power_limit(power: dict[str, Any]) -> tuple[float | None, str | None]:
+    # A default/maximum cap is not necessarily the cap currently in force.
+    current_key = next((key for key in power if _key(str(key)) == "currentpowerlimit"), None)
+    raw = power[current_key] if current_key is not None else _get(power, "Power Limit")
+    value = _number(raw, "W")
+    if value is not None and value > 0:
+        return value, None
+    if raw is None:
+        return None, "Current power limit field is missing from GMI"
+    if _string(raw) is None:
+        return None, "Current power limit is not reported by GMI"
+    return None, "GMI returned an invalid current power limit"
 
 
 def memory_bytes(value: Any) -> int | None:
@@ -131,6 +145,7 @@ def parse_devices(output: str) -> tuple[list[Device], str | None]:
         utilization = _section(entry, "Utilization")
         temperature = _section(entry, "Temperature")
         power = _section(entry, "Power Readings")
+        power_limit, power_limit_reason = _power_limit(power)
         clocks = _section(entry, "Clocks")
         devices.append(
             Device(
@@ -145,7 +160,8 @@ def parse_devices(output: str) -> tuple[list[Device], str | None]:
                 memory_free_bytes=memory_bytes(_get(memory, "Free")),
                 temperature_c=_number(_get(temperature, "GPU Current Temp"), "C", negative=True),
                 power_draw_w=_number(_get(power, "Power Draw"), "W"),
-                power_limit_w=_number(_get(power, "Current Power Limit", "Power Limit"), "W"),
+                power_limit_w=power_limit,
+                power_limit_reason=power_limit_reason,
                 graphics_clock_mhz=_number(_get(clocks, "Graphics"), "MHz"),
                 memory_clock_mhz=_number(_get(clocks, "Memory"), "MHz"),
             )
@@ -225,6 +241,8 @@ class GmiBackend:
         self._driver_version: str | None = None
         self._gmi_version: str | None = None
         self._musa_version: str | None = None
+        self._musa_version_source: str | None = None
+        self._musa_version_reason: str | None = None
         self._versions_checked = False
 
     def _run(self, *args: str, timeout: float | None = None) -> str:
@@ -260,16 +278,13 @@ class GmiBackend:
                 self._gmi_version = match[1]
         except CollectionError:
             pass
-        try:
-            data = json.loads(Path("/usr/local/musa/version.json").read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                self._musa_version = _string(_get(_section(data, "musa_toolkits"), "version"))
-        except (OSError, ValueError):
-            pass
+        self._musa_version, self._musa_version_source, self._musa_version_reason = detect_toolkit()
 
     def sample(self) -> Snapshot:
         self._detect_versions()
-        snapshot = Snapshot(gmi_version=self._gmi_version, musa_version=self._musa_version)
+        snapshot = Snapshot(gmi_version=self._gmi_version, musa_version=self._musa_version,
+                            musa_version_source=self._musa_version_source,
+                            musa_version_reason=self._musa_version_reason)
         try:
             devices, driver = parse_devices(self._run("-q", "--json"))
             self._devices = devices

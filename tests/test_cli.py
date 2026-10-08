@@ -63,5 +63,5 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 main(["--version"])
             self.assertEqual(exc.exception.code, 0)
-            self.assertIn("0.1.0", out.getvalue())
+            self.assertIn("0.1.1", out.getvalue())
             sample.assert_not_called()

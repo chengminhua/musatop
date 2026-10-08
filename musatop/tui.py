@@ -324,7 +324,12 @@ class TerminalUI:
                 )
             line += process.command or "N/A"
             self.put(row + index - self.process_offset, line, curses.A_REVERSE if index == self.selected else 0)
-        status = "; ".join(snapshot.errors) if snapshot.errors else self.message
+        note = ""
+        if any(device.power_limit_reason for device in snapshot.devices):
+            note = "Power limit N/A: GMI does not report a usable current limit (? for help)."
+        elif snapshot.musa_version is None and snapshot.musa_version_reason:
+            note = f"MUSA Toolkit: {snapshot.musa_version_reason}"
+        status = "; ".join(snapshot.errors) if snapshot.errors else (self.message or note)
         if self.search_input is not None:
             status = f"/{self.search_input}  [Enter apply, Esc cancel]"
         self.put(height - 2, status)
@@ -344,6 +349,9 @@ class TerminalUI:
                 "r / F5: request a fresh sample. Collection runs in the background.",
                 "q: quit; Ctrl-C: quit from any screen, never signal a process.",
                 "GPU and process values may be unavailable; N/A means unknown.",
+                "Power limit N/A: GMI did not report a usable current limit; power draw is separate.",
+                "musatop does not substitute a default cap, another GPU's cap, or zero.",
+                "--json includes power_limit_reason and Toolkit version source/reason.",
             ], "Enter / Esc / q return | Up / Down scroll"
         process = self.modal_process
         lines = [

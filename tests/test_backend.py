@@ -54,6 +54,28 @@ class DeviceParsingTests(unittest.TestCase):
         devices, _ = parse_devices('{"Attached GPUs":"0", "GPU":[]}')
         self.assertEqual(devices, [])
 
+    def test_unknown_current_power_limit_never_uses_another_cap(self):
+        for raw in ("N/A", "[Not Supported]", None, "0W", 0, "-1W", "NaNW", "bad"):
+            with self.subTest(raw=raw):
+                data = {"GPU": [{"Index": 0, "Power Readings": {
+                    "Power Draw ": "410W", "Power Limit": "950W",
+                    "Current Power Limit": raw, "Default Power Limit": "950W",
+                    "Max Power Limit": "1000W"}}]}
+                device = parse_devices(json.dumps(data))[0][0]
+                self.assertEqual(device.power_draw_w, 410)
+                self.assertIsNone(device.power_limit_w)
+                self.assertTrue(device.power_limit_reason)
+
+    def test_missing_limit_and_recovered_numeric_limit_have_correct_diagnostics(self):
+        cases = [({}, None), ({"Default Power Limit": "950W"}, None),
+                 ({"Power Limit": "950W"}, 950),
+                 ({"Power Limit": "950W", " current power limit ": "800 W"}, 800)]
+        for readings, expected in cases:
+            with self.subTest(readings=readings):
+                device = parse_devices(json.dumps({"GPU": [{"Index": 0, "Power Readings": readings}]}))[0][0]
+                self.assertEqual(device.power_limit_w, expected)
+                self.assertEqual(device.power_limit_reason is None, expected is not None)
+
     def test_corrupt_shapes_cannot_be_interpreted_as_empty(self):
         for value in ("not JSON", "[]", "{}", '{"GPU":{}}', '{"GPU":[null]}',
                       '{"GPU":[{}]}', '{"GPU":[{"Index":true}]}',
@@ -264,24 +286,28 @@ class BackendCollectionTests(unittest.TestCase):
         results = [completed("mthreads-gmi version : 2.3.3\n"), completed(QUERY), completed(EMPTY),
                    completed(QUERY), completed(EMPTY)]
         with patch("musatop.backend.subprocess.run", side_effect=results) as run, \
-             patch("musatop.backend.Path.read_text", return_value='{"musa_toolkits":{"version":"5.1.0"}}') as read:
+             patch("musatop.backend.detect_toolkit", return_value=("5.1.0", "/example/version.json", None)) as read:
             first = backend.sample()
             second = backend.sample()
         self.assertEqual(first.gmi_version, "2.3.3")
         self.assertEqual(second.musa_version, "5.1.0")
+        self.assertEqual(second.musa_version_source, "/example/version.json")
+        self.assertIsNone(second.musa_version_reason)
         self.assertEqual(run.call_count, 5)
         self.assertEqual(read.call_count, 1)
         self.assertEqual(run.call_args_list[0].kwargs["timeout"], 1)
         backend = GmiBackend()
         results = [FileNotFoundError(), completed(QUERY), completed(EMPTY), completed(QUERY), completed(EMPTY)]
         with patch("musatop.backend.subprocess.run", side_effect=results) as run, \
-             patch("musatop.backend.Path.read_text", side_effect=FileNotFoundError()) as read:
+             patch("musatop.backend.detect_toolkit", return_value=(None, None, "No MUSA Toolkit installation found")) as read:
             backend.sample()
             result = backend.sample()
         self.assertEqual(run.call_count, 5)
         self.assertEqual(read.call_count, 1)
         self.assertIsNone(result.gmi_version)
         self.assertIsNone(result.musa_version)
+        self.assertEqual(result.musa_version_reason, "No MUSA Toolkit installation found")
+        self.assertEqual(result.errors, [])
 
     def test_returned_snapshot_mutation_does_not_corrupt_cached_sample(self):
         backend = self.backend()

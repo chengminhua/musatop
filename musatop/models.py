@@ -22,6 +22,7 @@ class Device:
     temperature_c: float | None = None
     power_draw_w: float | None = None
     power_limit_w: float | None = None
+    power_limit_reason: str | None = None
     graphics_clock_mhz: float | None = None
     memory_clock_mhz: float | None = None
 
@@ -58,6 +59,8 @@ class Snapshot:
     driver_version: str | None = None
     gmi_version: str | None = None
     musa_version: str | None = None
+    musa_version_source: str | None = None
+    musa_version_reason: str | None = None
     host: Host = field(default_factory=Host)
     devices: list[Device] = field(default_factory=list)
     processes: list[Process] = field(default_factory=list)

@@ -247,6 +247,21 @@ class TerminalUITests(unittest.TestCase):
             self.ui.render()
             self.assertNotIn("Refresh requested", self.screen.content())
 
+    def test_missing_power_limit_note_yields_to_errors_and_is_explained_in_help(self):
+        self.monitor.snapshot.devices[0].power_limit_w = None
+        self.monitor.snapshot.devices[0].power_limit_reason = "Current power limit is not reported by GMI"
+        self.ui.update()
+        self.ui.render()
+        self.assertIn("Power limit N/A:", self.screen.content())
+        self.monitor.snapshot.errors = ["devices: driver failed"]
+        self.ui.update()
+        self.ui.render()
+        self.assertIn("devices: driver failed", self.screen.content())
+        self.assertNotIn("Power limit N/A:", self.screen.content())
+        self.ui.handle_key("?")
+        _, lines, _ = self.ui.modal_lines()
+        self.assertIn("power_limit_reason", "\n".join(lines))
+
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "PTY smoke test requires Linux")
 class PseudoTerminalTests(unittest.TestCase):

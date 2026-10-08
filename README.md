@@ -1,6 +1,6 @@
 # musatop
 
-面向摩尔线程 GPU 的交互式终端监控工具。`v0.1.0` 提供多卡状态、GPU 进程、主机 CPU/内存、筛选排序、进程详情和确认后的 SIGTERM 操作，也支持一次性文本及 JSON 输出。
+面向摩尔线程 GPU 的交互式终端监控工具。`v0.1.1` 提供多卡状态、GPU 进程、主机 CPU/内存、筛选排序、进程详情和确认后的 SIGTERM 操作，也支持一次性文本及 JSON 输出。
 
 本项目独立实现，功能与终端交互参考 [nputop](https://github.com/youyve/nputop) 和 [nvitop](https://github.com/XuehaiPan/nvitop)，没有复制这两个项目的源码。
 
@@ -95,12 +95,12 @@ musatop --sort pid --reverse         # PID 倒序
 
 ## 指标含义与 JSON
 
-设备状态来自 `mthreads-gmi -q --json`，GPU 进程归属及显存来自 `mthreads-gmi` 的进程表；用户、完整命令、CPU、RSS、创建时间及主机信息由 `psutil` 补全。GMI 版本单独查询；MUSA Toolkit 版本读取 `/usr/local/musa/version.json`，文件不可用时为未知，不从驱动版本推测。
+设备状态来自 `mthreads-gmi -q --json`，GPU 进程归属及显存来自 `mthreads-gmi` 的进程表；用户、完整命令、CPU、RSS、创建时间及主机信息由 `psutil` 补全。GMI 版本单独查询。MUSA Toolkit 版本读取安装目录的 `version.json`：依次检查 `MUSA_HOME` / `MUSA_PATH`、PATH 中 `mcc` 的真实位置、`/usr/local/musa`、唯一的 `/usr/local/musa-*` 安装。明确选择的目录优先；环境变量冲突、多版本未选择或元数据不可用时为未知，并记录原因。探测不执行编译器，也不从驱动或目录名推测版本。
 
 - **未知不等于零**：终端显示 `N/A`，JSON 使用 `null`。进程 CPU 的首次采样和主机 CPU 的首帧为未知，需要下一帧才能计算；一次性文本和 JSON 输出中的这些 CPU 值也通常为 `null`。
 - 进程 CPU 以单个逻辑 CPU 为 100%，多线程进程可以超过 100%。GPU 利用率是设备指标，不推断每个进程的 GPU 利用率。
 - 同一 PID 使用多张卡时，每张卡各占一行，GPU 显存按卡展示；这些行复用同一份宿主机 CPU 和 RSS，**不能将重复的 CPU/RSS 相加**。
-- 显存已用/总量与 GMI 的内存利用率是不同指标。功耗限制取自 GMI，不按型号估算。
+- 显存已用/总量与 GMI 的内存利用率是不同指标。`Power(W)` 的斜杠前是实时功耗，后是当前功率上限；实时功耗可读不代表上限可读。上限仅接受 GMI 的有效正数，未知或零值保留为 `N/A` 并附原因，不使用默认上限或其他 GPU 的数值替代。
 - 设备和进程来自两次查询，不保证同一瞬间。每个数据源分别记录成功时间；失败时保留上次成功结果并标记过期，首轮失败则没有可用数据。
 
 JSON 顶层包含以下字段；完整字段定义见 [`musatop/models.py`](musatop/models.py)：
@@ -112,10 +112,13 @@ JSON 顶层包含以下字段；完整字段定义见 [`musatop/models.py`](musa
 | `devices_sampled_at` / `processes_sampled_at` | 对应来源最近一次成功采样时间；从未成功为 `null` |
 | `devices_stale` / `processes_stale` | 对应来源本轮查询或解析是否失败；为 `true` 时不要把缓存值当作实时数据 |
 | `driver_version` / `gmi_version` / `musa_version` | 可获取的版本信息，未知为 `null` |
+| `musa_version_source` / `musa_version_reason` | Toolkit 元数据文件路径 / 无法确定版本的原因；无对应值为 `null` |
 | `host` | 主机名、主机 CPU 百分比、内存已用与总量 |
 | `devices` | GPU 编号、UUID、名称、PCI 地址、利用率、显存、温度、功耗与时钟 |
 | `processes` | 每个 GPU/PID 的显存及宿主机进程信息；`status` 可为 `ok`、`access_denied`、`exited`、`unverified` |
 | `errors` | 本轮采集错误说明；设备与进程来源分别标识 |
+
+设备的 `power_limit_reason` 说明上限缺失或无效的原因；上限可用时为 `null`。这些诊断字段在 v0.1.1 中以向后兼容方式添加，`schema_version` 仍为 `1`。单个可选指标不可用不会将整轮采集标为失败。
 
 字段名称直接包含单位：`*_bytes` 为字节，`*_w` 为瓦特，`*_c` 为摄氏度，`*_mhz` 为 MHz，`*_percent` 为百分比，`running_seconds` 为秒；进程 `create_time` 为 Unix 时间戳秒数。JSON 中保留数值单位，终端再转换为 MiB/GiB。应用筛选后，时间、错误及过期标记仍描述本轮实际采集状态。
 
@@ -134,6 +137,8 @@ JSON 顶层包含以下字段；完整字段定义见 [`musatop/models.py`](musa
 | --- | --- |
 | 找不到 `mthreads-gmi` | 在同一用户和同一环境运行 `command -v mthreads-gmi`；按厂商说明安装驱动/GMI，或将已安装程序所在目录加入 PATH |
 | JSON 或进程表解析失败 | 分别运行 `mthreads-gmi -q --json` 与 `mthreads-gmi`，检查驱动报错或输出格式变化；当前验证版本为 GMI 2.3.3 |
+| 功率显示 `410W/N/A` 等 | 前者是实时功耗，后者是当前上限。检查 GMI 原始 `Current Power Limit` 和 JSON `power_limit_reason`；若 GMI 本身返回 `N/A`，需排查驱动能力。已发现的驱动查询差异见 [N/A 定位记录](docs/NA_DIAGNOSIS.md) |
+| Toolkit 显示 `N/A` | 查看 JSON `musa_version_reason` / `musa_version_source`。多版本安装时通过 `MUSA_HOME` 选择实际使用的安装目录；重启工具后重新检测 |
 | 出现 `STALE` 或数据不可用 | 检查底部错误或 JSON `errors`；GMI 单次查询默认 3 秒超时；`r` 可请求刷新，成功后恢复更新 |
 | 有 PID，但用户名/命令缺失 | 进程可能已经退出，或当前用户无权读取对应 `/proc` 信息；查看进程 `status` |
 | TUI 无法初始化 | 确认在真实终端运行、`TERM` 设置有效且 Python 支持 curses；自动化任务使用 `--once` 或 `--json` |

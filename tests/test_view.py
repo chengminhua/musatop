@@ -122,6 +122,19 @@ class FormattingTests(unittest.TestCase):
         self.assertIn("STALE:", text)
         self.assertIn("old-devices, old-processes", text)
 
+    def test_optional_metric_diagnostics_preserve_null_and_are_not_collection_errors(self):
+        snapshot = Snapshot(musa_version_reason="Missing metadata\nINJECTED", devices=[
+            Device(0, power_draw_w=410, power_limit_reason="Current power limit is not reported by GMI")])
+        text = render_text(snapshot)
+        self.assertIn("power limit unavailable from GMI", text)
+        self.assertIn("MUSA Toolkit: Missing metadata INJECTED", text)
+        self.assertNotIn("ERROR:", text)
+        data = snapshot.to_dict()
+        self.assertIsNone(data["devices"][0]["power_limit_w"])
+        self.assertEqual(data["devices"][0]["power_draw_w"], 410)
+        self.assertTrue(data["devices"][0]["power_limit_reason"])
+        self.assertEqual(data["errors"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
