@@ -71,4 +71,4 @@ python tools/validate_history.py --seconds 600
 
 ## 文档界面图
 
-`python tools/render_preview.py docs/images/tui-v0.2.1.svg` 调用实际 TUI，以固定的合成主机、设备、进程和五分钟历史生成 SVG；不访问 GPU，不包含机器采样。可添加 `--width 80 --height 24` 检查紧凑布局。脚本只使用项目现有依赖和标准库；字体应支持 Braille，SVG 提供 DejaVu Sans 后备字体。
+`python tools/render_preview.py /tmp/musatop-preview.svg` 调用实际 TUI，以固定的合成主机、设备、进程和五分钟历史生成 SVG；不访问 GPU，不包含机器采样。可添加 `--width 80 --height 24` 检查紧凑布局。脚本只使用项目现有依赖和标准库；字体应支持 Braille，SVG 提供 DejaVu Sans 后备字体。生成的预览用于本地检查，不纳入 Git；README 使用脱敏后的实机截图。

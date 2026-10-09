@@ -4,9 +4,11 @@
 
 软件版本以 `musatop --version` 为准；JSON 的 `schema_version=1` 是数据结构版本，与软件版本独立。驱动、GMI、MUSA Toolkit 版本由当前机器检测，也不是 musatop 的版本。
 
-![v0.2.1 四图趋势界面](https://raw.githubusercontent.com/chengminhua/musatop/v0.2.1/docs/images/tui-v0.2.1.svg)
+![v0.2.1 八卡监控界面（已脱敏）](https://cdn.jsdelivr.net/gh/chengminhua/musatop@main/docs/images/tui-v0.2.1-redacted.webp)
 
-上图由当前 TUI 代码以 **120×34、合成数据**生成：GPU UTIL 为 99%，显存占用率为 69%。图中账号、主机和进程均为示例，不是真实运行日志。80×24 下自动改用较矮趋势图并对 GPU 分页。
+图片未加载时，可[直接查看截图](https://cdn.jsdelivr.net/gh/chengminhua/musatop@main/docs/images/tui-v0.2.1-redacted.webp)。
+
+上图为 **8 张 X10000** 的实机运行截图，主机名、时间戳、进程标识及命令路径已脱敏。80×24 下自动改用较矮趋势图并对 GPU 分页。
 
 ## 当前支持与验证范围
 
