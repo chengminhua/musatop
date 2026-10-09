@@ -4,8 +4,6 @@
 
 软件版本以 `musatop --version` 为准；JSON 的 `schema_version=1` 是数据结构版本，与软件版本独立。驱动、GMI、MUSA Toolkit 版本由当前机器检测，也不是 musatop 的版本。
 
-本项目独立实现，功能与终端交互参考 [nputop](https://github.com/youyve/nputop) 和 [nvitop](https://github.com/XuehaiPan/nvitop)，没有复制这两个项目的源码。
-
 ![v0.2.1 四图趋势界面](https://raw.githubusercontent.com/chengminhua/musatop/v0.2.1/docs/images/tui-v0.2.1.svg)
 
 上图由当前 TUI 代码以 **120×34、合成数据**生成：GPU UTIL 为 99%，显存占用率为 69%。图中账号、主机和进程均为示例，不是真实运行日志。80×24 下自动改用较矮趋势图并对 GPU 分页。
@@ -227,4 +225,4 @@ python -m build
 
 ## 许可证与致谢
 
-本项目采用 **GNU General Public License v3.0 only（GPL-3.0-only）**，完整条款见 [LICENSE](https://github.com/chengminhua/musatop/blob/v0.2.1/LICENSE)。感谢 [nputop](https://github.com/youyve/nputop) 和 [nvitop](https://github.com/XuehaiPan/nvitop) 提供的产品与交互参考；当前实现没有导入其源码。
+本项目采用 **GNU General Public License v3.0 only（GPL-3.0-only）**，完整条款见 [LICENSE](https://github.com/chengminhua/musatop/blob/v0.2.1/LICENSE)。感谢 [nputop](https://github.com/youyve/nputop) 和 [nvitop](https://github.com/XuehaiPan/nvitop) 提供的产品与交互参考。
