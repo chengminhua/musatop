@@ -6,42 +6,70 @@
 
 本项目独立实现，功能与终端交互参考 [nputop](https://github.com/youyve/nputop) 和 [nvitop](https://github.com/XuehaiPan/nvitop)，没有复制这两个项目的源码。
 
-![v0.2.1 四图趋势界面](docs/images/tui-v0.2.1.svg)
+![v0.2.1 四图趋势界面](https://raw.githubusercontent.com/chengminhua/musatop/v0.2.1/docs/images/tui-v0.2.1.svg)
 
 上图由当前 TUI 代码以 **120×34、合成数据**生成：GPU UTIL 为 99%，显存占用率为 69%。图中账号、主机和进程均为示例，不是真实运行日志。80×24 下自动改用较矮趋势图并对 GPU 分页。
 
 ## 当前支持与验证范围
 
 - 运行环境：Linux 宿主机、Python 3.10 及以上、已安装驱动且能执行的 `mthreads-gmi`。运行时 Python 依赖只有 `psutil`；不需要 PyTorch，不需要编译 MUSA 程序。
-- **X10000 真机验证通过**：验证环境为 8 张卡、每卡 80 GiB、GMI 2.3.3。各版本的测试数量、负载观测和验证范围分别记录在 [验证记录](docs/VALIDATION.md)，历史观测值不作为当前版本的性能指标。
+- **X10000 真机验证通过**：验证环境为 8 张卡、每卡 80 GiB、GMI 2.3.3。各版本的测试数量、负载观测和验证范围分别记录在 [验证记录](https://github.com/chengminhua/musatop/blob/v0.2.1/docs/VALIDATION.md)，历史观测值不作为当前版本的性能指标。
 - 工具展示宿主机可见的 PID；容器中的任务若能被宿主机的 GMI 和 `/proc` 看到，也会出现在宿主机进程表中。**在容器内部运行、MPC/vGPU、其他 GPU 型号及其他 GMI 版本尚未验证。**
 - GPU 编号直接使用 GMI 返回的编号，不按 `MUSA_VISIBLE_DEVICES` 重排或筛选。选择显示设备请使用 `--gpu`。
 
-进程发现与 SIGTERM 验证仅操作自建测试负载；具体执行版本、终端交互及恢复结果见 [验证记录](docs/VALIDATION.md)。GMI 接口参考 [摩尔线程官方 GMI 用户手册](https://docs.mthreads.com/gmc/gmc-doc-online/gmi/user_manual/)。
+进程发现与 SIGTERM 验证仅操作自建测试负载；具体执行版本、终端交互及恢复结果见 [验证记录](https://github.com/chengminhua/musatop/blob/v0.2.1/docs/VALIDATION.md)。GMI 接口参考 [摩尔线程官方 GMI 用户手册](https://docs.mthreads.com/gmc/gmc-doc-online/gmi/user_manual/)。
 
 ## 安装
 
-当前通过源码安装，尚未发布到 PyPI。先确认 `mthreads-gmi` 能在当前用户的终端中正常运行：
+使用 Python 3.10 及以上，从 [PyPI](https://pypi.org/project/musatop/) 安装即可，无需手动下载源码。建议安装到独立虚拟环境；先确认已安装的 `mthreads-gmi` 能在当前用户的终端中正常运行：
 
 ```bash
 mthreads-gmi
-git clone https://github.com/chengminhua/musatop.git
-cd musatop
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install .
+python3 -m venv ~/.venvs/musatop
+. ~/.venvs/musatop/bin/activate
+python -m pip install musatop
 musatop --version
+musatop
 ```
 
 若系统缺少 `ensurepip`，而系统 pip 支持 `--python` 参数，可改用下面的虚拟环境安装方式：
 
 ```bash
-python3 -m venv --without-pip .venv
-python3 -m pip --python .venv/bin/python install .
-.venv/bin/musatop --version
+python3 -m venv --without-pip ~/.venvs/musatop
+python3 -m pip --python ~/.venvs/musatop/bin/python install musatop
+~/.venvs/musatop/bin/musatop --version
 ```
 
-这些命令将依赖装入项目虚拟环境；不需要使用 `sudo`。从源码开发时，可将 `install .` 改为 `install -e .`。未激活环境时，使用 `.venv/bin/musatop`，或 `.venv/bin/python -m musatop`。
+这些命令将 Python 依赖装入虚拟环境，不需要 `sudo`。驱动和 `mthreads-gmi` 由系统提供，pip 不会安装它们。未激活环境时，可以直接运行 `~/.venvs/musatop/bin/musatop` 或 `~/.venvs/musatop/bin/python -m musatop`。
+
+### 升级
+
+在上面创建的虚拟环境中升级：
+
+```bash
+. ~/.venvs/musatop/bin/activate
+python -m pip install --upgrade musatop
+musatop --version
+```
+
+若使用无 pip 的虚拟环境，升级命令为 `python3 -m pip --python ~/.venvs/musatop/bin/python install --upgrade musatop`。已有源码安装请在原虚拟环境内升级；可通过 `python -m pip show musatop` 检查当前安装位置。升级后退出旧的 musatop 实例，再重新启动。
+
+若使用的软件源尚未同步新版本，可在安装或升级命令中添加 `--index-url https://pypi.org/simple/`，直接使用 PyPI。
+
+### 从源码开发
+
+需要修改代码时，克隆仓库并使用可编辑安装：
+
+```bash
+git clone https://github.com/chengminhua/musatop.git
+cd musatop
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+musatop --version
+```
+
+源码环境缺少 `ensurepip` 时，同样可用 `python3 -m venv --without-pip .venv`，再执行 `python3 -m pip --python .venv/bin/python install -e .`。仅希望从源码安装而不随代码修改更新时，将 `install -e .` 改为 `install .`。
 
 ## 使用
 
@@ -129,7 +157,7 @@ UTIL 进度条表示 GPU 利用率；VRAM 进度条表示显存已用容量占�
 - 显存已用/总量与 GMI 的内存利用率是不同指标。`Power(W)` 的斜杠前是实时功耗，后是当前功率上限；实时功耗可读不代表上限可读。上限仅接受 GMI 的有效正数，未知或零值保留为 `N/A` 并附原因，不使用默认上限或其他 GPU 的数值替代。
 - 设备和进程来自两次查询，不保证同一瞬间。每个数据源分别记录成功时间；失败时保留上次成功结果并标记过期，首轮失败则没有可用数据。
 
-JSON 顶层包含以下字段；完整字段定义见 [`musatop/models.py`](musatop/models.py)：
+JSON 顶层包含以下字段；完整字段定义见 [`musatop/models.py`](https://github.com/chengminhua/musatop/blob/v0.2.1/musatop/models.py)：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -144,7 +172,7 @@ JSON 顶层包含以下字段；完整字段定义见 [`musatop/models.py`](musa
 | `processes` | 每个 GPU/PID 的显存及宿主机进程信息；`status` 可为 `ok`、`access_denied`、`exited`、`unverified` |
 | `errors` | 本轮采集错误说明；设备与进程来源分别标识 |
 
-设备的 `power_limit_reason` 说明上限缺失或无效的原因；上限可用时为 `null`。单个可选指标不可用不会将整轮采集标为失败。字段变更的历史背景见 [N/A 定位记录](docs/NA_DIAGNOSIS.md)。
+设备的 `power_limit_reason` 说明上限缺失或无效的原因；上限可用时为 `null`。单个可选指标不可用不会将整轮采集标为失败。字段变更的历史背景见 [N/A 定位记录](https://github.com/chengminhua/musatop/blob/v0.2.1/docs/NA_DIAGNOSIS.md)。
 
 字段名称直接包含单位：`*_bytes` 为字节，`*_w` 为瓦特，`*_c` 为摄氏度，`*_mhz` 为 MHz，`*_percent` 为百分比，`running_seconds` 为秒；进程 `create_time` 为 Unix 时间戳秒数。JSON 中保留数值单位，终端再转换为 MiB/GiB。应用筛选后，时间、错误及过期标记仍描述本轮实际采集状态。
 
@@ -163,7 +191,7 @@ JSON 顶层包含以下字段；完整字段定义见 [`musatop/models.py`](musa
 | --- | --- |
 | 找不到 `mthreads-gmi` | 在同一用户和同一环境运行 `command -v mthreads-gmi`；按厂商说明安装驱动/GMI，或将已安装程序所在目录加入 PATH |
 | JSON 或进程表解析失败 | 分别运行 `mthreads-gmi -q --json` 与 `mthreads-gmi`，检查驱动报错或输出格式变化；当前验证版本为 GMI 2.3.3 |
-| 功率显示 `410W/N/A` 等 | 前者是实时功耗，后者是当前上限。检查 GMI 原始 `Current Power Limit` 和 JSON `power_limit_reason`；若 GMI 本身返回 `N/A`，需排查驱动能力。已发现的驱动查询差异见 [N/A 定位记录](docs/NA_DIAGNOSIS.md) |
+| 功率显示 `410W/N/A` 等 | 前者是实时功耗，后者是当前上限。检查 GMI 原始 `Current Power Limit` 和 JSON `power_limit_reason`；若 GMI 本身返回 `N/A`，需排查驱动能力。已发现的驱动查询差异见 [N/A 定位记录](https://github.com/chengminhua/musatop/blob/v0.2.1/docs/NA_DIAGNOSIS.md) |
 | Toolkit 显示 `N/A` | 查看 JSON `musa_version_reason` / `musa_version_source`。多版本安装时通过 `MUSA_HOME` 选择实际使用的安装目录；重启工具后重新检测 |
 | 出现 `STALE` 或数据不可用 | 检查底部错误或 JSON `errors`；GMI 单次查询默认 3 秒超时；`r` 可请求刷新，成功后恢复更新 |
 | 有 PID，但用户名/命令缺失 | 进程可能已经退出，或当前用户无权读取对应 `/proc` 信息；查看进程 `status` |
@@ -193,8 +221,10 @@ python -m pip install build
 python -m build
 ```
 
-单元测试不会启动 GPU 负载。真机验证需要单独检查空闲状态，并显式运行工具；构建和使用方式见 [GPU 验证小程序](tools/README.md)，实际结果见 [验证记录](docs/VALIDATION.md)。不要把一次已验证的硬件组合视作所有摩尔 GPU 的兼容性保证。
+单元测试不会启动 GPU 负载。真机验证需要单独检查空闲状态，并显式运行工具；构建和使用方式见 [GPU 验证小程序](https://github.com/chengminhua/musatop/blob/v0.2.1/tools/README.md)，实际结果见 [验证记录](https://github.com/chengminhua/musatop/blob/v0.2.1/docs/VALIDATION.md)。不要把一次已验证的硬件组合视作所有摩尔 GPU 的兼容性保证。
+
+维护者的构建、版本标签与 PyPI 发布步骤见 [发布维护说明](https://github.com/chengminhua/musatop/blob/v0.2.1/docs/PUBLISHING.md)。
 
 ## 许可证与致谢
 
-本项目采用 **GNU General Public License v3.0 only（GPL-3.0-only）**，完整条款见 [LICENSE](LICENSE)。感谢 [nputop](https://github.com/youyve/nputop) 和 [nvitop](https://github.com/XuehaiPan/nvitop) 提供的产品与交互参考；当前实现没有导入其源码。
+本项目采用 **GNU General Public License v3.0 only（GPL-3.0-only）**，完整条款见 [LICENSE](https://github.com/chengminhua/musatop/blob/v0.2.1/LICENSE)。感谢 [nputop](https://github.com/youyve/nputop) 和 [nvitop](https://github.com/XuehaiPan/nvitop) 提供的产品与交互参考；当前实现没有导入其源码。
