@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from musatop.history import HistoryBuffer, HistoryPoint, device_key
-from musatop.models import Device, Snapshot
+from musatop.history import AGGREGATE_KEY, HOST_KEY, HistoryBuffer, HistoryPoint, device_key
+from musatop.models import Device, Host, Snapshot
 from tools import validate_history as validation
 
 
@@ -30,7 +30,9 @@ class FakeProcess:
 
 
 def make_snapshot(second=1599):
-    return Snapshot(sampled_at=str(second), devices=[
+    return Snapshot(sampled_at=str(second),
+                    host=Host(hostname="private-hostname", cpu_percent=second % 101,
+                              memory_used_bytes=4 * 1024**3, memory_total_bytes=16 * 1024**3), devices=[
         Device(index=index, uuid=f"private-identity-{index}",
                gpu_utilization_percent=second % 101,
                memory_used_bytes=(second % 10) * 1024**3,
@@ -62,6 +64,9 @@ class FakeMonitor:
             self.second = second
             self.samples += 1
             self.snapshot = make_snapshot(second)
+            if self.samples == 1:
+                # psutil's first nonblocking CPU sample is deliberately absent.
+                self.snapshot.host.cpu_percent = None
             self.buffer.record(self.snapshot, now)
         return self.snapshot, self.buffer.snapshot(now)
 
@@ -89,14 +94,24 @@ class HistoryAcceptanceTests(unittest.TestCase):
             self.assertGreaterEqual(gpu["minimum_full_window_buckets"], 299)
             self.assertTrue(gpu["first_bucket_evicted"])
             self.assertEqual(gpu["util_percent_range"], [0, 100])
+        self.assertEqual([item["name"] for item in report["summaries"]], [AGGREGATE_KEY, HOST_KEY])
+        for summary in report["summaries"]:
+            self.assertEqual(summary["max_buckets"], 300)
+            self.assertGreaterEqual(summary["max_valid_util_buckets"], 299)
+            self.assertGreaterEqual(summary["max_valid_memory_buckets"], 299)
+            self.assertGreaterEqual(summary["minimum_full_window_buckets"], 299)
+            self.assertTrue(summary["first_bucket_evicted"])
+            self.assertEqual(summary["util_percent_range"], [0, 100])
+        self.assertEqual(report["summaries"][1]["memory_occupied_percent_range"], [25, 25])
         self.assertGreaterEqual(len(lines), 10)
         self.assertTrue(all(isinstance(json.loads(line), dict) for line in lines))
-        self.assertNotIn("private-identity", "".join(lines))
+        self.assertNotIn("private-", "".join(lines))
 
     def test_repeated_snapshot_is_not_counted_twice(self):
         state = validation.Acceptance(1000, 600)
         snapshot = make_snapshot(1000)
         history = {device_key(device): [HistoryPoint(1000, 0, 0)] for device in snapshot.devices}
+        history.update({key: [HistoryPoint(1000, 0, 0)] for key in (HOST_KEY, AGGREGATE_KEY)})
         state.observe(snapshot, history, 1000, 1024)
         state.observe(snapshot, history, 1000.2, 2048)
         self.assertEqual(state.samples, 1)
@@ -143,12 +158,14 @@ class HistoryAcceptanceTests(unittest.TestCase):
             state = validation.Acceptance(1000, 600)
         self.assertEqual(state.failures["history_window_configuration_not_300_seconds"], 1)
 
-    def inspect_history(self, points):
+    def inspect_history(self, points, key=None):
         state = validation.Acceptance(1000, 600)
         snapshot = make_snapshot()
         history = {device_key(device): [HistoryPoint(second, 0, 0) for second in range(1301, 1601)]
                    for device in snapshot.devices}
-        history[device_key(snapshot.devices[0])] = points
+        history.update({name: [HistoryPoint(second, 0, 0) for second in range(1301, 1601)]
+                        for name in (HOST_KEY, AGGREGATE_KEY)})
+        history[key or device_key(snapshot.devices[0])] = points
         state.observe(snapshot, history, 1600, 50 * 1024**2)
         return state
 
@@ -175,6 +192,57 @@ class HistoryAcceptanceTests(unittest.TestCase):
                 self.assertEqual(state.failures["invalid_history_metric_value"], 1)
                 self.assertEqual(state.devices[0].max_valid_util_buckets, 0)
                 self.assertEqual(state.devices[0].max_valid_memory_buckets, 0)
+
+    def test_summary_histories_require_full_window_coverage(self):
+        for key in (HOST_KEY, AGGREGATE_KEY):
+            for util, memory in ((None, 50), (50, None), (None, None)):
+                with self.subTest(key=key, util=util, memory=memory):
+                    state = self.inspect_history(
+                        [HistoryPoint(second, util, memory) for second in range(1301, 1601)], key)
+                    self.assertEqual(state.failures["full_history_metric_coverage_under_90_percent"], 1)
+                    self.assertNotIn("invalid_history_metric_value", state.failures)
+
+    def test_summary_initial_eviction_and_bucket_bounds_are_checked(self):
+        for key in (HOST_KEY, AGGREGATE_KEY):
+            with self.subTest(key=key):
+                state = self.inspect_history([HistoryPoint(second, 0, 0) for second in range(1000, 1601)], key)
+                for failure in ("history_exceeds_bucket_bound", "history_outside_time_window",
+                                "initial_bucket_not_evicted"):
+                    self.assertEqual(state.failures[failure], 1)
+
+    def test_summary_invalid_metrics_are_rejected(self):
+        for key in (HOST_KEY, AGGREGATE_KEY):
+            for value in (float("nan"), float("inf"), -1, 101, True):
+                with self.subTest(key=key, value=value):
+                    state = self.inspect_history([HistoryPoint(1599, value, value)], key)
+                    self.assertEqual(state.failures["invalid_history_metric_value"], 1)
+                    self.assertEqual(state.summaries[key].max_valid_util_buckets, 0)
+                    self.assertEqual(state.summaries[key].max_valid_memory_buckets, 0)
+
+    def test_missing_summary_history_fails_acceptance(self):
+        for key in (HOST_KEY, AGGREGATE_KEY):
+            with self.subTest(key=key):
+                class MissingSummary(FakeMonitor):
+                    def latest_with_history(self):
+                        snapshot, history = super().latest_with_history()
+                        del history[key]
+                        return snapshot, history
+
+                report, _, _ = self.run_fake(MissingSummary)
+                self.assertFalse(report["passed"])
+                self.assertGreater(report["failures"]["history_empty_for_required_summary"], 0)
+                self.assertIn("valid_history_window_under_90_percent", report["failures"])
+
+    def test_summary_exact_270_valid_seconds_pass_coverage_threshold(self):
+        for key in (HOST_KEY, AGGREGATE_KEY):
+            with self.subTest(key=key):
+                points = [HistoryPoint(second, 0, 0) for second in range(1331, 1601)]
+                state = self.inspect_history(points, key)
+                self.assertNotIn("full_history_window_under_90_percent", state.failures)
+                self.assertNotIn("full_history_metric_coverage_under_90_percent", state.failures)
+                state = self.inspect_history(points[1:], key)
+                self.assertEqual(state.failures["full_history_window_under_90_percent"], 1)
+                self.assertEqual(state.failures["full_history_metric_coverage_under_90_percent"], 1)
 
     def test_stale_and_collection_errors_are_fixed_categories(self):
         state = validation.Acceptance(1000, 600)

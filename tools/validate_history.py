@@ -14,7 +14,8 @@ import time
 
 import psutil
 
-from musatop.history import WINDOW_SECONDS, device_key, memory_percent
+from musatop.history import (AGGREGATE_KEY, HOST_KEY, WINDOW_SECONDS, aggregate_values,
+                             device_key, host_memory_percent, memory_percent)
 from musatop.monitor import Monitor
 
 
@@ -31,7 +32,7 @@ def valid_percent(value):
 
 @dataclass
 class DeviceStats:
-    """Only the numeric index and aggregate metrics enter the public report."""
+    """Numeric history statistics, shared by devices and named summaries."""
 
     first_second: int | None = None
     first_bucket_evicted: bool = False
@@ -63,6 +64,11 @@ class DeviceStats:
             "memory_occupied_percent_range": [self.memory_min, self.memory_max],
         }
 
+    def summary_report(self, name):
+        report = self.report(None)
+        del report["gpu_index"]
+        return {"name": name, **report}
+
 
 @dataclass
 class Acceptance:
@@ -75,6 +81,7 @@ class Acceptance:
     max_history_age: int = 0
     failures: Counter = field(default_factory=Counter)
     devices: dict[int, DeviceStats] = field(default_factory=dict)
+    summaries: dict[str, DeviceStats] = field(default_factory=dict)
     _keys: dict[int, str] = field(default_factory=dict)
     _previous_sample: str | None = None
     _last_observed: float | None = None
@@ -107,7 +114,7 @@ class Acceptance:
         current_keys = [device_key(device) for device in snapshot.devices]
         if None in current_keys or len(set(current_keys)) != len(current_keys):
             self.failures["missing_or_duplicate_device_identity"] += 1
-        if set(history) != {key for key in current_keys if key is not None}:
+        if set(history) - {HOST_KEY, AGGREGATE_KEY} != {key for key in current_keys if key is not None}:
             self.failures["history_device_mismatch"] += 1
         for device, key in zip(snapshot.devices, current_keys):
             if key is None:
@@ -118,48 +125,63 @@ class Acceptance:
             stats = self.devices.setdefault(device.index, DeviceStats())
             stats.add_value("util", device.gpu_utilization_percent)
             stats.add_value("memory", memory_percent(device))
-            points = history.get(key, [])
-            seconds = [point.second for point in points]
-            valid_util = sum(valid_percent(point.util_percent) for point in points)
-            valid_memory = sum(valid_percent(point.memory_percent) for point in points)
-            if any(value is not None and not valid_percent(value)
-                   for point in points for value in (point.util_percent, point.memory_percent)):
-                self.failures["invalid_history_metric_value"] += 1
-            stats.max_buckets = max(stats.max_buckets, len(points))
-            stats.max_valid_util_buckets = max(stats.max_valid_util_buckets, valid_util)
-            stats.max_valid_memory_buckets = max(stats.max_valid_memory_buckets, valid_memory)
-            if len(points) > EXPECTED_WINDOW_SECONDS:
-                self.failures["history_exceeds_bucket_bound"] += 1
-            if seconds != sorted(set(seconds)):
-                self.failures["history_seconds_not_unique_and_ordered"] += 1
-            if not seconds:
-                self.failures["history_empty_for_present_device"] += 1
-                continue
-            # The read and this observation can straddle a second boundary;
-            # allow that one second, but never allow 301 stored buckets.
-            age = math.floor(now) - seconds[0]
-            self.max_history_age = max(self.max_history_age, age)
-            if age > EXPECTED_WINDOW_SECONDS or seconds[-1] > math.floor(now):
-                self.failures["history_outside_time_window"] += 1
-            if stats.first_second is None:
-                stats.first_second = seconds[0]
-            if math.floor(now) > stats.first_second + EXPECTED_WINDOW_SECONDS:
-                if stats.first_second in seconds:
-                    self.failures["initial_bucket_not_evicted"] += 1
-                else:
-                    stats.first_bucket_evicted = True
-            if now - self.started >= EXPECTED_WINDOW_SECONDS + 5:
-                previous_count = stats.minimum_full_window_buckets
-                stats.minimum_full_window_buckets = len(points) if previous_count is None else min(previous_count, len(points))
-                if len(points) < EXPECTED_WINDOW_SECONDS * 0.9:
-                    self.failures["full_history_window_under_90_percent"] += 1
-                if min(valid_util, valid_memory) < EXPECTED_WINDOW_SECONDS * 0.9:
-                    self.failures["full_history_metric_coverage_under_90_percent"] += 1
+            self._observe_history(stats, history.get(key, []), now)
+        summary_values = {
+            HOST_KEY: (snapshot.host.cpu_percent, host_memory_percent(snapshot.host)),
+            AGGREGATE_KEY: aggregate_values(snapshot.devices),
+        }
+        for name, (util, memory) in summary_values.items():
+            stats = self.summaries.setdefault(name, DeviceStats())
+            stats.add_value("util", util)
+            stats.add_value("memory", memory)
+            if any(value is not None and not valid_percent(value) for value in (util, memory)):
+                self.failures["invalid_summary_metric_value"] += 1
+            self._observe_history(stats, history.get(name, []), now, summary=True)
+
+    def _observe_history(self, stats, points, now, *, summary=False):
+        """Apply identical five-minute coverage and eviction rules to every plot."""
+        seconds = [point.second for point in points]
+        valid_util = sum(valid_percent(point.util_percent) for point in points)
+        valid_memory = sum(valid_percent(point.memory_percent) for point in points)
+        if any(value is not None and not valid_percent(value)
+               for point in points for value in (point.util_percent, point.memory_percent)):
+            self.failures["invalid_history_metric_value"] += 1
+        stats.max_buckets = max(stats.max_buckets, len(points))
+        stats.max_valid_util_buckets = max(stats.max_valid_util_buckets, valid_util)
+        stats.max_valid_memory_buckets = max(stats.max_valid_memory_buckets, valid_memory)
+        if len(points) > EXPECTED_WINDOW_SECONDS:
+            self.failures["history_exceeds_bucket_bound"] += 1
+        if seconds != sorted(set(seconds)):
+            self.failures["history_seconds_not_unique_and_ordered"] += 1
+        if not seconds:
+            self.failures["history_empty_for_required_summary" if summary else "history_empty_for_present_device"] += 1
+            return
+        # The read and this observation can straddle a second boundary;
+        # allow that one second, but never allow 301 stored buckets.
+        age = math.floor(now) - seconds[0]
+        self.max_history_age = max(self.max_history_age, age)
+        if age > EXPECTED_WINDOW_SECONDS or seconds[-1] > math.floor(now):
+            self.failures["history_outside_time_window"] += 1
+        if stats.first_second is None:
+            stats.first_second = seconds[0]
+        if math.floor(now) > stats.first_second + EXPECTED_WINDOW_SECONDS:
+            if stats.first_second in seconds:
+                self.failures["initial_bucket_not_evicted"] += 1
+            else:
+                stats.first_bucket_evicted = True
+        if now - self.started >= EXPECTED_WINDOW_SECONDS + 5:
+            previous_count = stats.minimum_full_window_buckets
+            stats.minimum_full_window_buckets = len(points) if previous_count is None else min(previous_count, len(points))
+            if len(points) < EXPECTED_WINDOW_SECONDS * 0.9:
+                self.failures["full_history_window_under_90_percent"] += 1
+            if min(valid_util, valid_memory) < EXPECTED_WINDOW_SECONDS * 0.9:
+                self.failures["full_history_metric_coverage_under_90_percent"] += 1
 
     def progress(self, now):
         return {"check": "history", "state": "running",
                 "elapsed_seconds": round(now - self.started, 1), "samples": self.samples,
                 "max_buckets_per_gpu": max((d.max_buckets for d in self.devices.values()), default=0),
+                "max_buckets_per_summary": max((d.max_buckets for d in self.summaries.values()), default=0),
                 "failed_observations": sum(self.failures.values())}
 
     def finish(self, now, cpu_seconds):
@@ -174,10 +196,13 @@ class Acceptance:
             self.failures["sample_gap_at_least_five_seconds"] += 1
         if len(self.devices) != EXPECTED_DEVICES:
             self.failures["expected_eight_device_histories"] += 1
-        if any(not device.first_bucket_evicted for device in self.devices.values()):
+        if set(self.summaries) != {HOST_KEY, AGGREGATE_KEY}:
+            self.failures["expected_host_and_aggregate_histories"] += 1
+        all_stats = list(self.devices.values()) + list(self.summaries.values())
+        if any(not device.first_bucket_evicted for device in all_stats):
             self.failures["initial_bucket_eviction_not_observed"] += 1
         if any(device.max_valid_util_buckets < EXPECTED_WINDOW_SECONDS * 0.9 or
-               device.max_valid_memory_buckets < EXPECTED_WINDOW_SECONDS * 0.9 for device in self.devices.values()):
+               device.max_valid_memory_buckets < EXPECTED_WINDOW_SECONDS * 0.9 for device in all_stats):
             self.failures["valid_history_window_under_90_percent"] += 1
         second_half = [rss for elapsed_at_sample, rss in self._rss if elapsed_at_sample >= self.duration / 2]
         growth = max(0, max(second_half) - second_half[0]) if second_half else None
@@ -195,6 +220,7 @@ class Acceptance:
             "second_half_rss_growth_bytes": growth,
             "cpu_percent_one_core": round(100 * cpu_seconds / elapsed, 3) if elapsed > 0 else None,
             "gpus": [self.devices[index].report(index) for index in sorted(self.devices)],
+            "summaries": [self.summaries[name].summary_report(name) for name in sorted(self.summaries)],
             "failures": dict(sorted(self.failures.items())),
         }
 

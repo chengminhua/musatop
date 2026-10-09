@@ -1,4 +1,4 @@
-"""Terminal-width-independent primitives for load bars and five-minute sparklines."""
+"""Pure geometry for device load bars and five-minute terminal area graphs."""
 
 from __future__ import annotations
 
@@ -38,10 +38,18 @@ def bar_cells(value: float | None, width: int, *, ascii: bool = False) -> str:
 def trend_values(
     points: Iterable[HistoryPoint], metric: str, width: int, now: int,
 ) -> list[float | None]:
-    """Project seconds [now-299, now] onto columns, preserving observed peaks.
+    """Project [now-299, now] onto fixed, monotonic-time-anchored peak buckets.
 
-    A column with no valid observation stays unknown. Larger displays retain
-    gaps rather than expanding a one-second sample into invented observations.
+    ``width`` counts horizontal samples, i.e. twice the character width for a
+    Braille graph. With at least two samples, bucket boundaries are multiples
+    of 300 / (width - 1) seconds from the monotonic clock's origin. Integer
+    arithmetic avoids rounding at these rational boundaries. Moving ``now``
+    changes a single shared column offset, never the grouping of old points.
+
+    Only the open bucket may acquire new samples; the oldest partial bucket
+    may lose expired samples. Reprojection after a width change is deliberate.
+    Empty buckets remain unknown, even at widths exceeding 300 samples.
+    A one-sample graph necessarily uses the peak of the entire visible window.
     """
     if metric not in ("util_percent", "memory_percent"):
         raise ValueError(f"Unknown history metric: {metric}")
@@ -49,17 +57,67 @@ def trend_values(
         return []
     values: list[float | None] = [None] * width
     first = now - 299
+    scale = width - 1
+    current_bucket = now * scale // 300
     for point in points:
-        age = point.second - first
-        if not 0 <= age < 300:
+        if not first <= point.second <= now:
             continue
         value = valid_percent(getattr(point, metric))
         if value is None:
             continue
-        column = min(width - 1, ((age + 1) * width - 1) // 300)
+        bucket = point.second * scale // 300
+        column = width - 1 + bucket - current_bucket
         previous = values[column]
         values[column] = value if previous is None else max(previous, value)
     return values
+
+
+def area_rows(
+    values: Iterable[float | None], height: int, *,
+    upside_down: bool = False, ascii: bool = False,
+) -> list[str]:
+    """Draw a fixed 0–100% area graph, with its baseline toward the time axis.
+
+    Braille characters contain two horizontal samples and four vertical dots.
+    ASCII uses one sample per character and ``:`` / ``#`` for partial / full
+    cells. Missing values are blank, while observed zero has a one-dot baseline.
+    ``upside_down`` mirrors the vertical geometry so paired graphs can share
+    an axis. An odd Braille sample count is padded with an unknown right half.
+    """
+    if height <= 0:
+        return []
+    samples = [valid_percent(value) for value in values]
+    vertical_steps = height * (2 if ascii else 4)
+    fills = [
+        0 if value is None else max(1, int(value * vertical_steps / 100))
+        for value in samples
+    ]
+    if ascii:
+        rows = []
+        for row in range(height):
+            baseline_row = row if upside_down else height - row - 1
+            counts = [max(0, min(2, fill - baseline_row * 2)) for fill in fills]
+            rows.append("".join(" :#"[count] for count in counts))
+        return rows
+
+    # Braille's dot numbering is column-major with the fourth row at bits 6/7.
+    dots = ((1, 8), (2, 16), (4, 32), (64, 128))
+    if len(fills) % 2:
+        fills.append(0)
+    rows = []
+    for row in range(height):
+        cells = []
+        for column in range(0, len(fills), 2):
+            bits = 0
+            for dy, pair in enumerate(dots):
+                y = row * 4 + dy
+                distance = y if upside_down else vertical_steps - y - 1
+                for dx, bit in enumerate(pair):
+                    if distance < fills[column + dx]:
+                        bits |= bit
+            cells.append(chr(0x2800 + bits) if bits else " ")
+        rows.append("".join(cells))
+    return rows
 
 
 def spark_cells(values: Iterable[float | None], *, ascii: bool = False) -> str:

@@ -4,6 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from musatop import __version__
 from musatop.cli import main
 from musatop.models import Device, Process, Snapshot
 
@@ -63,7 +64,7 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as exc:
                 main(["--version"])
             self.assertEqual(exc.exception.code, 0)
-            self.assertIn("0.2.0", out.getvalue())
+            self.assertEqual(f"musatop {__version__}\n", out.getvalue())
             sample.assert_not_called()
 
     def test_display_flags_do_not_change_one_shot_formats(self):

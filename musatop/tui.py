@@ -9,8 +9,10 @@ import time
 from dataclasses import replace
 
 from musatop import __version__
-from musatop.bars import bar_cells, percent_label, spark_cells, trend_values
-from musatop.history import device_key, memory_percent
+from musatop.bars import area_rows, bar_cells, percent_label, trend_values
+from musatop.history import (
+    AGGREGATE_KEY, HOST_KEY, aggregate_values, device_key, host_memory_percent, memory_percent,
+)
 from musatop.models import Process, Snapshot
 from musatop.processes import terminate_process
 from musatop.view import (
@@ -51,11 +53,12 @@ class TerminalUI:
         self.process_page_size = 1
         self.history = {}
         self.show_trend = True
-        self.trend_identity = None
+        self.trend_identity = AGGREGATE_KEY
         encoding = getattr(screen, "encoding", None) or locale.getpreferredencoding(False)
         self.ascii = options.ascii or encoding.lower().replace("-", "") != "utf8"
         self.colors: list[int] = []
         self.unknown_color = 0
+        self.metric_colors: dict[str, int] = {}
         self.modal: str | None = None
         self.modal_process: Process | None = None
         self.modal_offset = 0
@@ -76,10 +79,11 @@ class TerminalUI:
     def processes(self) -> list[Process]:
         return self.visible.processes if self.visible is not None else []
 
-    def update(self) -> None:
+    def update(self, *, read_sample: bool = True) -> None:
         previous = self.current_process()
         selected_identity = _identity(previous) if previous is not None else None
-        self.snapshot, self.history = self.monitor.latest_with_history()
+        if read_sample:
+            self.snapshot, self.history = self.monitor.latest_with_history()
         self.visible = (
             filter_snapshot(self.snapshot, self.options)
             if self.snapshot is not None
@@ -102,25 +106,28 @@ class TerminalUI:
         return ("key", device_key(device)) if device_key(device) else ("index", device.index)
 
     def current_trend_device(self):
+        if self.trend_identity == AGGREGATE_KEY:
+            return None
         devices = self.visible.devices if self.visible is not None else []
         for device in devices:
             if self.trend_device_identity(device) == self.trend_identity:
                 return device
-        device = devices[0] if devices else None
-        self.trend_identity = self.trend_device_identity(device) if device is not None else None
-        return device
+        # A removed or filtered device must not redirect its old history to another GPU.
+        self.trend_identity = AGGREGATE_KEY
+        return None
 
     def cycle_trend_device(self, step: int) -> None:
-        current = self.current_trend_device()
-        if current is not None:
-            devices = self.visible.devices
-            index = next(i for i, device in enumerate(devices) if device is current)
-            self.trend_identity = self.trend_device_identity(devices[(index + step) % len(devices)])
+        self.current_trend_device()
+        devices = self.visible.devices if self.visible is not None else []
+        identities = [AGGREGATE_KEY] + [self.trend_device_identity(device) for device in devices]
+        index = identities.index(self.trend_identity)
+        self.trend_identity = identities[(index + step) % len(identities)]
 
     def init_colors(self) -> None:
         """Color is optional; a plain terminal retains every metric and state."""
         self.colors = []
         self.unknown_color = 0
+        self.metric_colors = {}
         if self.options.no_color:
             return
         try:
@@ -147,9 +154,21 @@ class TerminalUI:
             pair = len(foregrounds) + 1
             curses.init_pair(pair, unknown, background)
             self.unknown_color = curses.color_pair(pair)
+            # Historical values retain the same metric color as they move. Height,
+            # not a red/yellow threshold, distinguishes e.g. 69% from 99%.
+            for metric, foreground in (("cpu", curses.COLOR_CYAN),
+                                       ("ram", curses.COLOR_MAGENTA),
+                                       ("vram", curses.COLOR_YELLOW),
+                                       ("util", curses.COLOR_GREEN)):
+                pair += 1
+                if pair >= curses.COLOR_PAIRS:
+                    break
+                curses.init_pair(pair, foreground, background)
+                self.metric_colors[metric] = curses.color_pair(pair)
         except curses.error:
             self.colors = []
             self.unknown_color = 0
+            self.metric_colors = {}
 
     def load_color(self, percentage: float) -> int:
         if not self.colors:
@@ -302,13 +321,22 @@ class TerminalUI:
     def render_main(self, height: int, width: int) -> None:
         snapshot = self.visible
         host = snapshot.host
-        self.put(
-            0,
-            f"musatop {__version__} | {host.hostname or 'N/A'} | "
-            f"CPU {fmt_number(host.cpu_percent, '%')} | "
-            f"RAM {fmt_bytes(host.memory_used_bytes)}/{fmt_bytes(host.memory_total_bytes)}",
-            curses.A_BOLD,
-        )
+        metrics = (f"CPU {fmt_number(host.cpu_percent, '%')} | "
+                   f"RAM {fmt_bytes(host.memory_used_bytes)}/{fmt_bytes(host.memory_total_bytes)}")
+        title = f"musatop {__version__}"
+        # In narrow windows this is the only host-metric display. Reserve those
+        # fields before allocating space to the hostname, which may be very long.
+        if len(title) + 3 + len(metrics) > width - 1:
+            title = "musatop"
+        hostname_budget = width - 1 - len(title) - len(metrics) - 6
+        hostname = safe_text(host.hostname or "N/A")
+        if hostname_budget >= 4:
+            if len(hostname) > hostname_budget:
+                hostname = hostname[:hostname_budget - 1] + "~"
+            header = f"{title} | {hostname} | {metrics}"
+        else:
+            header = f"{title} | {metrics}"
+        self.put(0, header, curses.A_BOLD)
         self.put(
             1,
             f"Driver {snapshot.driver_version or 'N/A'}  "
@@ -320,9 +348,10 @@ class TerminalUI:
         if snapshot.processes_stale:
             stale.append("PROCESS DATA STALE")
         devices = snapshot.devices
-        trend_visible = self.show_trend and height >= 16
-        # Eight GPUs + five processes + three trend rows fit at exactly 80x24.
-        self.device_page_size = max(1, height - (15 if trend_visible else 12))
+        trend_height = self.trend_height(height)
+        # Allocate readable graphs first, then GPU pages while reserving process rows.
+        minimum_processes = 5 if height >= 34 else 3 if height >= 24 else 1
+        self.device_page_size = max(1, height - 8 - trend_height - minimum_processes)
         self.device_offset = min(self.device_offset, max(0, len(devices) - self.device_page_size))
         stop = min(len(devices), self.device_offset + self.device_page_size)
         page = f" GPUs {self.device_offset + 1}-{stop}/{len(devices)}" if len(devices) > self.device_page_size else ""
@@ -352,6 +381,9 @@ class TerminalUI:
                 empty_devices = "No GPUs match the selected filters."
             self.put(row, empty_devices)
             row += 1
+        if trend_height:
+            self.render_trend(row, width, (trend_height - 3) // 2)
+            row += trend_height
         filters = []
         if self.options.current_user:
             filters.append("current user")
@@ -372,7 +404,7 @@ class TerminalUI:
             header = " GPU     PID USER        GPU MEM   CPU%      RSS     TIME COMMAND"
         self.put(row, header, curses.A_UNDERLINE)
         row += 1
-        self.process_page_size = max(1, height - row - 2 - (3 if trend_visible else 0))
+        self.process_page_size = max(1, height - row - 2)
         if self.selected < self.process_offset:
             self.process_offset = self.selected
         if self.selected >= self.process_offset + self.process_page_size:
@@ -401,8 +433,6 @@ class TerminalUI:
                 )
             line += process.command or "N/A"
             self.put(row + index - self.process_offset, line, curses.A_REVERSE if index == self.selected else 0)
-        if trend_visible:
-            self.render_trend(height - 5, width)
         note = ""
         if any(device.power_limit_reason for device in snapshot.devices):
             note = "Power limit N/A: GMI does not report a usable current limit (? for help)."
@@ -452,39 +482,95 @@ class TerminalUI:
         power = f"{fmt_number(device.power_draw_w)}/{fmt_number(device.power_limit_w)}"
         self.put(row, f"{memory:>{memory_width}} {fmt_number(device.temperature_c, 'C'):>4} {power:>9}", attr, col=col)
 
-    def render_trend(self, row: int, width: int) -> None:
+    def trend_height(self, height: int) -> int:
+        if not self.show_trend or height < 18:
+            return 0
+        return 13 if height >= 34 else 9 if height >= 24 else 7
+
+    def render_trend(self, row: int, width: int, half_height: int = 3) -> None:
         device = self.current_trend_device()
-        stale = self.visible.devices_stale
-        state = " STALE" if stale else ""
-        target = f"GPU {device.index}" if device is not None else "no visible GPU"
-        self.put(row, f"Trend {target}{state} | 5 min (-5m -> now) | fixed 0-100%", curses.A_BOLD)
-        key = device_key(device) if device is not None else None
-        points = self.history.get(key, []) if key else []
-        current = (device.gpu_utilization_percent, memory_percent(device)) if device is not None else (None, None)
+        snapshot = self.visible
+        stale = snapshot.devices_stale
+        if device is None:
+            target = f"ALL {len(snapshot.devices)}"
+            key = AGGREGATE_KEY
+            util, memory = aggregate_values(snapshot.devices)
+        else:
+            target = f"GPU {device.index}"
+            key = device_key(device)
+            util, memory = device.gpu_utilization_percent, memory_percent(device)
+        gpu_points = self.history.get(key, []) if key is not None else []
+        gpu = ((f"{target} VRAM", "memory_percent", memory, "vram"),
+               ("UTIL", "util_percent", util, "util"), gpu_points, stale)
+        panels = [gpu]
+        if width >= 80:
+            host = snapshot.host
+            panels.insert(0, (("CPU", "util_percent", host.cpu_percent, "cpu"),
+                              ("RAM", "memory_percent", host_memory_percent(host), "ram"),
+                              self.history.get(HOST_KEY, []), False))
+        drawable_width = width - 1
+        inner_width = drawable_width - len(panels) - 1
+        panel_widths = [inner_width // len(panels)] * len(panels)
+        panel_widths[-1] += inner_width % len(panels)
+        horizontal, vertical = ("-", "|") if self.ascii else ("─", "│")
+        corners = ("+", "+", "+", "+", "+", "+", "+", "+") if self.ascii else (
+            "┌", "┬", "┐", "├", "┼", "┤", "└", "┴")
+        top = corners[0] + corners[1].join(horizontal * size for size in panel_widths) + corners[2]
+        middle = corners[3] + corners[4].join(horizontal * size for size in panel_widths) + corners[5]
+        bottom = corners[6] + corners[7].join(horizontal * size for size in panel_widths) + ("+" if self.ascii else "┘")
+        axis_row = row + half_height + 1
+        bottom_row = row + 2 * half_height + 2
+        self.put(row, top)
+        self.put(axis_row, middle)
+        self.put(bottom_row, bottom)
+        blank = vertical + vertical.join(" " * size for size in panel_widths) + vertical
+        for y in list(range(row + 1, axis_row)) + list(range(axis_row + 1, bottom_row)):
+            self.put(y, blank)
         now = int(time.monotonic())
-        curve_width = min(300, max(1, width - 14))
-        for offset, (label, metric, value) in enumerate(zip(
-            ("UTIL", "VRAM"), ("util_percent", "memory_percent"), current,
-        ), 1):
-            values = trend_values(points, metric, curve_width, now)
-            curve = spark_cells(values, ascii=self.ascii)
-            attr = curses.A_DIM if stale else 0
-            self.put(row + offset, f"{label} |", attr)
-            for index, (character, point_value) in enumerate(zip(curve, values)):
-                color = self.load_color(point_value) if point_value is not None else 0
-                self.put(row + offset, character, attr | color, col=6 + index)
-            self.put(row + offset, "| " + percent_label(value), attr, col=6 + curve_width)
+        col = 1
+        for panel_index, (upper, lower, points, is_stale) in enumerate(panels):
+            size = panel_widths[panel_index]
+            dim = curses.A_DIM if is_stale else 0
+            axis = list(horizontal * size)
+            # Axis labels are separate from the plot, so their cells cannot conceal a peak.
+            for label, position in (("5m", 0), ("3m", round((size - 1) * 0.4)),
+                                    ("0%", size // 2 + 2),
+                                    ("1m", round((size - 1) * 0.8)), ("now", size - 3)):
+                axis[position:position + len(label)] = label
+            self.put(axis_row, "".join(axis), curses.A_DIM, col=col)
+            for metric_index, (label, metric, current, color_key) in enumerate((upper, lower)):
+                values = trend_values(points, metric, size if self.ascii else 2 * size, now)
+                graph = area_rows(values, half_height, upside_down=bool(metric_index), ascii=self.ascii)
+                graph_row = row + 1 if metric_index == 0 else axis_row + 1
+                attr = self.metric_colors.get(color_key, 0) | dim
+                for offset, line in enumerate(graph):
+                    self.put(graph_row + offset, line, attr, col=col)
+                text = f"{label} Now {fmt_number(current, '%')} 100%"
+                if is_stale:
+                    text += " STALE"
+                if panel_index == 0 and metric_index == 0:
+                    text = "Trend " + text
+                if panel_index == 0 and metric_index == 1:
+                    text += " | 5 min peaks"
+                # Labels occupy only border rows; all plot rows remain available.
+                self.put(row if metric_index == 0 else bottom_row,
+                         (" " + text + " ")[:size], attr | curses.A_BOLD, col=col)
+            col += size + 1
 
     def modal_lines(self) -> tuple[str, list[str], str]:
         if self.modal == "help":
             return "musatop help", [
                 "Up / Down / Tab: select a process; Home / End: first / last process.",
                 "PgUp / PgDn: scroll GPU pages when GPUs exceed the available rows.",
-                "g / G: next / previous trend GPU; independent of process selection.",
-                "h: show / hide the three-row trend panel (auto-hidden below 16 rows).",
+                "g / G: cycle ALL visible GPUs and individual GPUs; independent of process selection.",
+                "h: show / hide trends; auto-hidden below 18 rows, restored after resize.",
                 "UTIL and VRAM bars use a fixed 0-100% scale; VRAM is used / total bytes.",
                 "Trends show 5 minutes (300 seconds), oldest left and newest right.",
-                "Each second and each display column show the observed peak, not an average.",
+                "Now labels show current samples; graph columns show observed peaks, not averages.",
+                "Closed time buckets retain their height as they move; resize reprojects the graph.",
+                "CPU/RAM and VRAM/UTIL mirror around 0%; outer edges are 100%.",
+                "ALL UTIL is the mean of visible GPUs; ALL VRAM is total used / total capacity.",
+                "Incomplete aggregate metrics show N/A; gaps are never interpolated.",
                 "Missing / failed samples leave gaps; zero has a baseline. STALE data is dim.",
                 "--ascii uses ASCII bars / curves; --no-color disables colors (TUI only).",
                 "s: next process sort field; S: reverse sort order.",
@@ -539,14 +625,28 @@ class TerminalUI:
             curses.curs_set(0)
         except curses.error:
             pass
+        last_revision = object()
+        last_second = None
+        last_size = None
+        last_message = None
+        dirty = True
         while self.running:
-            self.update()
-            self.render()
+            second = int(time.monotonic())
+            revision = getattr(self.monitor, "revision", None)
+            size = self.screen.getmaxyx()
+            message = self.message
+            new_sample = revision != last_revision or (revision is None and second != last_second)
+            if dirty or new_sample or second != last_second or size != last_size or message != last_message:
+                self.update(read_sample=new_sample)
+                self.render()
+                last_revision, last_second, last_size, last_message = revision, second, size, message
+                dirty = False
             try:
                 key = self.screen.get_wch()
             except curses.error:
                 continue
             self.handle_key(key)
+            dirty = True
         return 0
 
 

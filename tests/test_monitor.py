@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from musatop.history import HistoryPoint, device_key
+from musatop.history import AGGREGATE_KEY, HOST_KEY, HistoryPoint, device_key
 from musatop.models import Device, Host, Process, Snapshot
 from musatop.monitor import Monitor
 
@@ -55,10 +55,26 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual([d.index for d in snapshot.devices], [0])
         self.assertIn("Host sampling failed", snapshot.errors[0])
 
+    def test_host_failure_clears_any_previous_host_values(self):
+        backend = MagicMock()
+        backend.sample.return_value = Snapshot(host=Host(cpu_percent=99))
+        monitor = self.make_monitor(backend)
+        monitor.enricher.host.side_effect = OSError("host metrics unavailable")
+        self.assertEqual(monitor.sample().host, Host())
+
+    def test_gpu_collection_failure_does_not_prevent_fresh_host_history(self):
+        backend = MagicMock()
+        backend.sample.return_value = Snapshot(devices_stale=True, errors=["devices: timed out"])
+        monitor = self.make_monitor(backend)
+        snapshot = monitor.sample()
+        monitor._history.record(snapshot, 42)
+        self.assertEqual(monitor._history.snapshot(42), {HOST_KEY: [HistoryPoint(42, 12, None)]})
+
     def test_start_is_idempotent_and_latest_returns_an_independent_copy(self):
         backend = MagicMock()
         backend.sample.return_value = Snapshot(devices=[Device(0)])
         monitor = self.make_monitor(backend)
+        self.assertEqual(monitor.revision, 0)
         self.assertIsNone(monitor.latest())
         monitor.start()
         first_thread = monitor._thread
@@ -71,6 +87,7 @@ class MonitorTests(unittest.TestCase):
         self.assertIsNone(monitor.latest().devices[0].name)
         self.assertEqual(monitor.latest().errors, [])
         self.assertEqual(backend.sample.call_count, 1)
+        self.assertEqual(monitor.revision, 1)
 
     def test_background_failure_keeps_last_data_and_marks_both_sections_stale(self):
         backend = MagicMock()
@@ -90,6 +107,8 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.processes_sampled_at, "process-success")
         self.assertIn("RuntimeError: driver unavailable", snapshot.errors[0])
         self.assertFalse(original.devices_stale)
+        self.assertEqual(snapshot.host, Host())
+        self.assertEqual(monitor.revision, 2)
 
     def test_initial_background_failure_produces_an_error_snapshot(self):
         backend = MagicMock()
@@ -191,6 +210,20 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(observations[1][1][key], [HistoryPoint(11, 10, 25)])
         self.assertFalse(result.devices_stale)
         self.assertEqual(backend.sample.call_count, 3)
+        self.assertEqual(history[HOST_KEY], [HistoryPoint(11, 12, None), HistoryPoint(33, 12, None)])
+        self.assertEqual(history[AGGREGATE_KEY], [HistoryPoint(11, 10, 25), HistoryPoint(33, 80, 60)])
+        self.assertEqual(monitor.revision, 3)
+
+    def test_monitor_applies_startup_gpu_filter_to_aggregate_only(self):
+        monitor = Monitor(backend=MagicMock(), gpu_indices={1})
+        self.addCleanup(monitor.stop)
+        first = Device(0, uuid="fixture-a", gpu_utilization_percent=10)
+        second = Device(1, uuid="fixture-b", gpu_utilization_percent=80)
+        monitor._history.record(Snapshot(devices=[first, second]), 5)
+        with patch("musatop.monitor.time.monotonic", return_value=5):
+            _, history = monitor.latest_with_history()
+        self.assertEqual(history[AGGREGATE_KEY], [HistoryPoint(5, 80, None)])
+        self.assertIn(device_key(first), history)
 
     def test_latest_with_history_is_consistent_and_independent_and_expires_without_sampling(self):
         monitor = self.make_monitor()

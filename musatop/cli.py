@@ -53,7 +53,7 @@ def main(argv=None) -> int:
     options = Options(gpu=args.gpu, pid=args.pid, user=args.user, sort=args.sort, reverse=args.reverse,
                       ascii=args.ascii, no_color=args.no_color)
     from .monitor import Monitor
-    monitor = Monitor(args.interval)
+    monitor = Monitor(args.interval, gpu_indices=args.gpu)
     try:
         if args.once or args.json or not (sys.stdin.isatty() and sys.stdout.isatty()):
             snapshot = filter_snapshot(monitor.sample(), options)

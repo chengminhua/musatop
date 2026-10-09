@@ -7,19 +7,20 @@ import time
 
 from .backend import GmiBackend
 from .history import HistoryBuffer, HistoryPoint
-from .models import Snapshot, utc_now
+from .models import Host, Snapshot, utc_now
 from .processes import ProcessEnricher
 
 
 class Monitor:
-    def __init__(self, interval: float = 1.0, backend=None):
+    def __init__(self, interval: float = 1.0, backend=None, gpu_indices: set[int] | None = None):
         if not math.isfinite(interval) or not 0 < interval <= 3600:
             raise ValueError("sampling interval must be positive and at most 3600 seconds")
         self.interval = interval
         self.backend = backend if backend is not None else GmiBackend()
         self.enricher = ProcessEnricher()
         self._snapshot: Snapshot | None = None
-        self._history = HistoryBuffer()
+        self._history = HistoryBuffer(gpu_indices=gpu_indices)
+        self._revision = 0
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -28,6 +29,7 @@ class Monitor:
     def sample(self) -> Snapshot:
         snapshot = self.backend.sample()
         snapshot.processes = self.enricher.enrich(snapshot.processes)
+        snapshot.host = Host()
         try:
             snapshot.host = self.enricher.host()
         except (OSError, RuntimeError) as exc:
@@ -50,15 +52,23 @@ class Monitor:
                 snapshot = self.latest() or Snapshot()
                 snapshot.sampled_at = utc_now()
                 snapshot.devices_stale = snapshot.processes_stale = True
+                snapshot.host = Host()
                 snapshot.errors = [f"Sampling failed: {type(exc).__name__}: {exc}"]
             with self._lock:
                 self._history.record(snapshot, time.monotonic())
                 self._snapshot = snapshot
+                self._revision += 1
             self._wake.wait(max(0, self.interval - (time.monotonic() - started)))
 
     def latest(self) -> Snapshot | None:
         with self._lock:
             return copy.deepcopy(self._snapshot)
+
+    @property
+    def revision(self) -> int:
+        """Cheap publication counter, so the UI need not copy unchanged data."""
+        with self._lock:
+            return self._revision
 
     def latest_with_history(self) -> tuple[Snapshot | None, dict[str, list[HistoryPoint]]]:
         """Return consistent, independently owned data for one UI redraw."""

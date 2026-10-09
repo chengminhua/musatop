@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musatop"
-version = "0.2.0"
+dynamic = ["version"]
 description = "An interactive terminal monitor for Moore Threads GPUs"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,3 +28,6 @@ musatop = "musatop.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["musatop*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "musatop.__version__"}
